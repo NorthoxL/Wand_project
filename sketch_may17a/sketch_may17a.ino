@@ -17,19 +17,42 @@ unsigned long lastUpdate = 0; // 时间戳
 
 void setup() {
   Serial.begin(115200);
-  while (!Serial) delay(10);
-  delay(1000);
+  
+  // 3秒串口等待超时
+  unsigned long start_time = millis();
+  while (!Serial) { if (millis() - start_time > 3000) break; delay(10); }
+  delay(500);
+  Serial.println("\r\n--- 启动总线修复程序 ---");
 
+  // 【核心自救步骤】：强行释放被引脚复用锁住的总线
+  pinMode(I2C_SCL, OUTPUT);
+  pinMode(I2C_SDA, INPUT_PULLUP); // 让SDA保持高电平
+  
+  // 产生9个时钟脉冲，迫使可能卡死的IMU释放SDA数据线
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(I2C_SCL, LOW);
+    delayMicroseconds(5);
+    digitalWrite(I2C_SCL, HIGH);
+    delayMicroseconds(5);
+  }
+  
+  // 确保恢复成高电平状态，给芯片一个平稳的启动环境
+  digitalWrite(I2C_SCL, HIGH); 
+  delay(10);
+
+  // 重新进入标准的 I2C 初始化
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(400000); 
 
+  // 如果 0x69 还是报错，可以尝试改成 0x68 试试
   if (imu.beginI2C(0x69, Wire) != BMI2_OK) {
-    Serial.println("IMU Init Failed!");
-    while (1);
+    Serial.println("错误：BMI270 初始化失败！总线仍被占用或地址错误。");
+    while (1) delay(1000);
   }
+  
+  Serial.println("BMI270 成功连接！开始进入 Mahony 解算。");
   lastUpdate = micros();
 }
-
 // ==========================================
 // 核心：Mahony 6DOF 四元数更新算法
 // ==========================================

@@ -53,7 +53,7 @@ while True:
                 # VPython 的渲染坐标系是：X右, Y上, Z出屏幕
                 # 因此我们需要做一个轴映射：VPython 的 Y 等于 IMU 的 Z，VPython 的 Z 等于 IMU 的 -Y
                 
-                v_axis = vector(vx, uz, -vy)
+                v_axis = vector(vx, vz, -vy)
                 v_up   = vector(ux, uz, -uy) 
                 
                 # 直接赋予绝对姿态，永杀死锁
