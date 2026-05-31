@@ -15,6 +15,15 @@ unsigned long lastUpdate = 0; // 时间戳
 #define Kp 2.0f   // 比例增益：决定加速度计纠正重力方向的速度
 #define Ki 0.005f // 积分增益：用于消除陀螺仪的零偏误差
 
+// ==========================================
+// 新增：魔法棒手势识别 (画圆) 全局变量
+// ==========================================
+float last_gx = 0.0f, last_gz = 0.0f;
+float cross_sum = 0.0f;
+int wave_samples = 0;
+const float CIRCLE_THRESHOLD = 150.0f; // 触发画圆的角速度向量模长阈值 (可根据力度微调)
+const float CROSS_SUM_THRESHOLD = 15000.0f; // 动作结算的积分阈值 (越大要求画圆越完整)
+
 void setup() {
   Serial.begin(115200);
   
@@ -50,9 +59,10 @@ void setup() {
     while (1) delay(1000);
   }
   
-  Serial.println("BMI270 成功连接！开始进入 Mahony 解算。");
+  Serial.println("BMI270 成功连接！开始进入手势识别与姿态解算。");
   lastUpdate = micros();
 }
+
 // ==========================================
 // 核心：Mahony 6DOF 四元数更新算法
 // ==========================================
@@ -62,55 +72,36 @@ void MahonyAHRSupdateIMU(float gx, float gy, float gz, float ax, float ay, float
   float halfex, halfey, halfez;
   float qa, qb, qc;
 
-  // 只有加速度计数据有效时才进行融合
   if(!((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f))) {
-    
-    // 1. 加速度计数据归一化
     recipNorm = 1.0f / sqrt(ax * ax + ay * ay + az * az);
-    ax *= recipNorm;
-    ay *= recipNorm;
-    az *= recipNorm;
+    ax *= recipNorm; ay *= recipNorm; az *= recipNorm;
 
-    // 2. 提取当前四元数所表示的理论重力方向
     halfvx = q1 * q3 - q0 * q2;
     halfvy = q0 * q1 + q2 * q3;
     halfvz = q0 * q0 - 0.5f + q3 * q3;
 
-    // 3. 计算理论重力与实际加速度计测量的叉积（即误差）
     halfex = (ay * halfvz - az * halfvy);
     halfey = (az * halfvx - ax * halfvz);
     halfez = (ax * halfvy - ay * halfvx);
 
-    // 4. 将误差进行 PI 计算，并补偿到陀螺仪角速度中
     if(Ki > 0.0f) {
       integralFBx += Ki * halfex * dt;
       integralFBy += Ki * halfey * dt;
       integralFBz += Ki * halfez * dt;
-      gx += integralFBx;
-      gy += integralFBy;
-      gz += integralFBz;
+      gx += integralFBx; gy += integralFBy; gz += integralFBz;
     }
-    gx += Kp * halfex;
-    gy += Kp * halfey;
-    gz += Kp * halfez;
+    gx += Kp * halfex; gy += Kp * halfey; gz += Kp * halfez;
   }
 
-  // 5. 根据补偿后的角速度，更新四元数积分
-  gx *= (0.5f * dt);
-  gy *= (0.5f * dt);
-  gz *= (0.5f * dt);
+  gx *= (0.5f * dt); gy *= (0.5f * dt); gz *= (0.5f * dt);
   qa = q0; qb = q1; qc = q2;
   q0 += (-qb * gx - qc * gy - q3 * gz);
   q1 += (qa * gx + qc * gz - q3 * gy);
   q2 += (qa * gy - qb * gz + q3 * gx);
   q3 += (qa * gz + qb * gy - qc * gx);
 
-  // 6. 四元数重新归一化
   recipNorm = 1.0f / sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
-  q0 *= recipNorm;
-  q1 *= recipNorm;
-  q2 *= recipNorm;
-  q3 *= recipNorm;
+  q0 *= recipNorm; q1 *= recipNorm; q2 *= recipNorm; q3 *= recipNorm;
 }
 
 void loop() {
@@ -120,23 +111,66 @@ void loop() {
 
   imu.getSensorData();
 
-  // 必须将陀螺仪数据从 度/秒 (dps) 转换为 弧度/秒 (rad/s) 才能代入四元数微积分
+  // ---------------------------------------------------------
+  // 模块 1：后台执行 Mahony 算法更新四元数
+  // ---------------------------------------------------------
   float gx_rad = imu.data.gyroX * PI / 180.0f;
   float gy_rad = imu.data.gyroY * PI / 180.0f;
   float gz_rad = imu.data.gyroZ * PI / 180.0f;
-
   float ax = imu.data.accelX;
   float ay = imu.data.accelY;
   float az = imu.data.accelZ;
 
-  // 调用 Mahony 算法更新四元数
   MahonyAHRSupdateIMU(gx_rad, gy_rad, gz_rad, ax, ay, az, dt);
 
-  // 打印输出四元数 q0, q1, q2, q3，以逗号分隔
-  Serial.print(q0, 4); Serial.print(",");
-  Serial.print(q1, 4); Serial.print(",");
-  Serial.print(q2, 4); Serial.print(",");
-  Serial.println(q3, 4);
+  // ---------------------------------------------------------
+  // 模块 2：魔法棒 "画圆" 手势识别核心逻辑
+  // ---------------------------------------------------------
+  // 提取 X 和 Z 轴原始角速度 (dps)
+  float raw_gx = imu.data.gyroX;
+  float raw_gz = imu.data.gyroZ;
+
+  // 1. 计算 X-Z 平面的合角速度大小
+  float magnitude = sqrt(raw_gx * raw_gx + raw_gz * raw_gz);
+
+  // 2. 如果角速度够大，说明正在画圆挥舞
+  if (magnitude > CIRCLE_THRESHOLD) {
+     
+     // 计算当前向量与上一次向量的二维叉乘
+     float cross = last_gx * raw_gz - last_gz * raw_gx;
+     
+     // 累加叉乘值（过滤手抖）
+     cross_sum += cross;
+     wave_samples++;
+     
+  } else {
+     // 3. 动作结束，角速度降下来了，开始结算！
+     if (wave_samples > 10) { // 确保这是一个持续的画圆动作，而不是碰了一下
+        
+        // 叉乘总和的正负，绝对代表了画圆的方向
+        if (cross_sum > CROSS_SUM_THRESHOLD) {
+            Serial.println("01"); // 识别为顺时针 (或逆时针，反了请互换 01 和 02)
+        } else if (cross_sum < -CROSS_SUM_THRESHOLD) {
+            Serial.println("02"); 
+        }
+     }
+     
+     // 结算完毕，重置积分器，等待下一次施法
+     cross_sum = 0;
+     wave_samples = 0;
+  }
+
+  // 记录本次数据，供下一次叉乘使用
+  last_gx = raw_gx;
+  last_gz = raw_gz;
+
+  // ---------------------------------------------------------
+  // 为了让串口只输出 01 和 02 信号，暂时屏蔽四元数的打印
+  // ---------------------------------------------------------
+  // Serial.print(q0, 4); Serial.print(",");
+  // Serial.print(q1, 4); Serial.print(",");
+  // Serial.print(q2, 4); Serial.print(",");
+  // Serial.println(q3, 4);
 
   delay(10); 
 }
