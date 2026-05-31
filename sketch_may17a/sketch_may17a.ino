@@ -16,13 +16,13 @@ unsigned long lastUpdate = 0; // 时间戳
 #define Ki 0.005f // 积分增益：用于消除陀螺仪的零偏误差
 
 // ==========================================
-// 新增：魔法棒手势识别 (画圆) 全局变量
+// 新增：魔法棒手势识别 (画圆) 全局变量 (低延迟版)
 // ==========================================
 float last_gx = 0.0f, last_gz = 0.0f;
 float cross_sum = 0.0f;
-int wave_samples = 0;
-const float CIRCLE_THRESHOLD = 150.0f; // 触发画圆的角速度向量模长阈值 (可根据力度微调)
-const float CROSS_SUM_THRESHOLD = 15000.0f; // 动作结算的积分阈值 (越大要求画圆越完整)
+const float CIRCLE_THRESHOLD = 150.0f;      // 触发画圆的角速度向量模长阈值
+const float CROSS_SUM_THRESHOLD = 10000.0f; // 降低积分阈值，实现半圈秒触发
+unsigned long lastTriggerTime = 0;          // 新增：技能冷却时间戳
 
 void setup() {
   Serial.begin(115200);
@@ -124,7 +124,7 @@ void loop() {
   MahonyAHRSupdateIMU(gx_rad, gy_rad, gz_rad, ax, ay, az, dt);
 
   // ---------------------------------------------------------
-  // 模块 2：魔法棒 "画圆" 手势识别核心逻辑
+  // 模块 2：魔法棒 "画圆" 手势识别核心逻辑 (低延迟实时触发版)
   // ---------------------------------------------------------
   // 提取 X 和 Z 轴原始角速度 (dps)
   float raw_gx = imu.data.gyroX;
@@ -136,28 +136,28 @@ void loop() {
   // 2. 如果角速度够大，说明正在画圆挥舞
   if (magnitude > CIRCLE_THRESHOLD) {
      
-     // 计算当前向量与上一次向量的二维叉乘
+     // 计算当前向量与上一次向量的二维叉乘并累加
      float cross = last_gx * raw_gz - last_gz * raw_gx;
-     
-     // 累加叉乘值（过滤手抖）
      cross_sum += cross;
-     wave_samples++;
      
-  } else {
-     // 3. 动作结束，角速度降下来了，开始结算！
-     if (wave_samples > 10) { // 确保这是一个持续的画圆动作，而不是碰了一下
+     // 【核心改进：动作进行中，一旦积分破线，立刻开火！】
+     if (millis() - lastTriggerTime > 600) { // 600毫秒冷却时间，防止单次画圆连发
         
-        // 叉乘总和的正负，绝对代表了画圆的方向
         if (cross_sum > CROSS_SUM_THRESHOLD) {
-            Serial.println("01"); // 识别为顺时针 (或逆时针，反了请互换 01 和 02)
+            Serial.println("01"); // 识别为顺时针 (反了请互换 01 和 02)
+            lastTriggerTime = millis();
+            cross_sum = 0.0f;     // 触发后瞬间清空积分
+            
         } else if (cross_sum < -CROSS_SUM_THRESHOLD) {
             Serial.println("02"); 
+            lastTriggerTime = millis();
+            cross_sum = 0.0f;     // 触发后瞬间清空积分
         }
      }
      
-     // 结算完毕，重置积分器，等待下一次施法
-     cross_sum = 0;
-     wave_samples = 0;
+  } else {
+     // 3. 【核心改进】：一旦手停下来，立刻清空积分。防止攒“假积分”导致走火。
+     cross_sum = 0.0f;
   }
 
   // 记录本次数据，供下一次叉乘使用
@@ -172,5 +172,9 @@ void loop() {
   // Serial.print(q2, 4); Serial.print(",");
   // Serial.println(q3, 4);
 
-  delay(10); 
+  // ---------------------------------------------------------
+  // 模块 3：降低硬件轮询延迟
+  // ---------------------------------------------------------
+  // 将 IMU 采样率强行提升到约 200Hz，极大地缩短系统的输入响应时间
+  delay(4); 
 }
